@@ -1,47 +1,48 @@
 /* Motmot camera trigger device
-   http://code.astraw.com/projects/motmot
-   Andrew Straw
+http://code.astraw.com/projects/motmot
+Andrew Straw
 */
 
 /* Camera trigger generator with synchronized analog input
 
-Also includes digital trigger pulses to trigger other hardware.
+   Also includes digital trigger pulses to trigger other hardware.
 
-Known bugs:
+   Known bugs:
 
-* The framestamp immediately after a camera trigger pulse has a
-  rolled-over TCNT3 (a low value just above zero) while framecount_A
-  is still indicating the previous frame. This can be worked around by
-  ignoring all framestamp values where TCNT3 is low.
+ * The framestamp immediately after a camera trigger pulse has a
+ rolled-over TCNT3 (a low value just above zero) while framecount_A
+ is still indicating the previous frame. This can be worked around by
+ ignoring all framestamp values where TCNT3 is low.
 
-* The variable framecount_A ends up giving a reading of 2 for the
-  first trigger pulse emitted.
+ * The variable framecount_A ends up giving a reading of 2 for the
+ first trigger pulse emitted.
 
 */
 
 /*
-  Copyright 2009  California Institute of Technology
-  Copyright 2009  Dean Camera (dean [at] fourwalledcubicle [dot] com)
+   Copyright 2009  California Institute of Technology
+   Copyright 2009  Dean Camera (dean [at] fourwalledcubicle [dot] com)
 
-  Permission to use, copy, modify, and distribute this software
-  and its documentation for any purpose and without fee is hereby
-  granted, provided that the above copyright notice appear in all
-  copies and that both that the copyright notice and this
-  permission notice and warranty disclaimer appear in supporting
-  documentation, and that the name of the author not be used in
-  advertising or publicity pertaining to distribution of the
-  software without specific, written prior permission.
+   Permission to use, copy, modify, and distribute this software
+   and its documentation for any purpose and without fee is hereby
+   granted, provided that the above copyright notice appear in all
+   copies and that both that the copyright notice and this
+   permission notice and warranty disclaimer appear in supporting
+   documentation, and that the name of the author not be used in
+   advertising or publicity pertaining to distribution of the
+   software without specific, written prior permission.
 
-  The author disclaim all warranties with regard to this
-  software, including all implied warranties of merchantability
-  and fitness.  In no event shall the author be liable for any
-  special, indirect or consequential damages or any damages
-  whatsoever resulting from loss of use, data or profits, whether
-  in an action of contract, negligence or other tortious action,
-  arising out of or in connection with the use or performance of
-  this software.
-*/
+   The author disclaim all warranties with regard to this
+   software, including all implied warranties of merchantability
+   and fitness.  In no event shall the author be liable for any
+   special, indirect or consequential damages or any damages
+   whatsoever resulting from loss of use, data or profits, whether
+   in an action of contract, negligence or other tortious action,
+   arising out of or in connection with the use or performance of
+   this software.
+   */
 
+#include <stdlib.h>
 #include "camtrig.h"
 #include "handler.h"
 #include <stdint.h>
@@ -50,10 +51,22 @@ Known bugs:
 #define FALSE 0
 #define TRUE 1
 
+#define TIMER1_TOP 500
+#define RAND_PULSE_SHORT 0
+#define RAND_PULSE_LONG  1
+#define RAND_PULSE_NOT_FOUND 2
+#define RAND_PULSE_BUF_SZ 10
+
 /* globals */
 uint8_t   send_data_back_to_host=FALSE;
 volatile uint8_t trig_once_mode=0;
 RingBuff_t Tx_Buffer; // analog samples
+
+/* WBD - globals */
+/* -------------------------------------------------------------------*/
+volatile uint8_t rand_pulse_width = RAND_PULSE_SHORT;
+volatile rand_pulse_buf_t rand_pulse_buf;
+/* ------------------------------------------------------------------ */
 
 /* A simple buffer of the enabled ADC channels */
 #define MAX_ADC_CHANS 4
@@ -72,34 +85,52 @@ BUTTLOADTAG(LUFAVersion, "LUFA V" LUFA_VERSION_STRING);
 /* Scheduler Task List */
 TASK_LIST
 {
-        { Task: USB_USBTask          , TaskStatus: TASK_RUN  },
-	{ Task: USB_ControlDevice_Task          , TaskStatus: TASK_RUN  },
-	{ Task: USB_AnalogSample_Task          , TaskStatus: TASK_RUN  },
+    { Task: USB_USBTask             , TaskStatus: TASK_RUN  },
+    { Task: USB_ControlDevice_Task  , TaskStatus: TASK_RUN  },
+    { Task: USB_AnalogSample_Task   , TaskStatus: TASK_RUN  },
 };
 
 
 void PWM_Init(void);
 void PWM_Init() {
-    /*
+  /*
 
-  n = 3 (timer3)
+     n = 3 (timer3)
 
-  Set frequency of PWM using ICRn to set TOP. (Not double-buffered,
-  also, clear TCNT before setting.)
+     Set frequency of PWM using ICRn to set TOP. (Not double-buffered,
+     also, clear TCNT before setting.)
 
-  Set compare value using OCRnA.
+     Set compare value using OCRnA.
 
-  WGMn3:0 = 14
+WGMn3:0 = 14
 
-  */
+*/
 
   // set output direction on pin
   PORTC &= 0x87; // pin C3-6 set low to start
-  DDRC |= 0xFF; // enable output for all PORTC
+  //DDRC |= 0xFF; // enable output for all PORTC
+
+  // //////////////////////////////////////////////////////////////////////////
+  // WBD - only enable pins on PORT C that are required 
+  DDRC = 0b01001000;  // Enables pins for OCR3A, port C external triggers disabled 
+
+  // Note, intially we may want OCR3B  disabled - and enable for triger.
+
+  DDRB = 0b01100000;  // Enbles pins for OCR1A  and OCR2A
+
+  //// Set up timer 1
+  ICR1 = TIMER1_TOP;  // Timer 1 top
+  TCCR1A = 0b10101010;
+  TCCR1B = 0b00011001;
+
+  // Set PWM values to zero initially
+  OCR1A = 0;
+  OCR1B = 0;
+
+  /////////////////////////////////////////////////////////////////////////////
 
   // Set output compare to mid-point
   OCR3A = 0x03e8;
-
   OCR3B = 0x0;
   OCR3C = 0x0;
 
@@ -141,7 +172,7 @@ volatile uint32_t framecount_A=0;
 
 /* Use a 2nd variable for high bits of framecount_A to avoid crazy
  * slow code emitted by GCC for int64.
-*/
+ */
 
 volatile uint32_t epoch=0;
 
@@ -176,50 +207,50 @@ ISR(ADC_vect, ISR_BLOCK)
       fakeadc=0;
     }
 #endif
-  uint16_t tcnt3_copy = TCNT3; // grab early so it corresponds with time of sample
-  input_channel = ADC_GetChannel() & 0x03; // only low 2 bits... we're only using first 4 channels
+    uint16_t tcnt3_copy = TCNT3; // grab early so it corresponds with time of sample
+    input_channel = ADC_GetChannel() & 0x03; // only low 2 bits... we're only using first 4 channels
 
-  //pack input channel into LSBs
-  analog_value |= check_previous_mask;
-  analog_value |= overflowed;        // set marker if necessary
-  analog_value |= input_channel;     // low 2 bits set to input_channel
+    //pack input channel into LSBs
+    analog_value |= check_previous_mask;
+    analog_value |= overflowed;        // set marker if necessary
+    analog_value |= input_channel;     // low 2 bits set to input_channel
 
-  check_previous_mask = ((analog_value>>2) & 0x30); // insert saved most LSBs, which are least likely to be correlated
+    check_previous_mask = ((analog_value>>2) & 0x30); // insert saved most LSBs, which are least likely to be correlated
 
-  ADC_CHAN_IDX++;
-  if ((ADC_CHAN_IDX) >= ADC_N_CHANS) {
-    ADC_CHAN_IDX=0;
-  }
-  ADC_SetChannel( ADC_REFERENCE_AVCC | ADC_LEFT_ADJUSTED | ADC_CHANS[ADC_CHAN_IDX] );
+    ADC_CHAN_IDX++;
+    if ((ADC_CHAN_IDX) >= ADC_N_CHANS) {
+      ADC_CHAN_IDX=0;
+    }
+    ADC_SetChannel( ADC_REFERENCE_AVCC | ADC_LEFT_ADJUSTED | ADC_CHANS[ADC_CHAN_IDX] );
 
-  uint8_t send_framecount = 0;
-  if (timestamp_inc>0) {
-    timestamp_inc--;
-  } else {
-    timestamp_inc=250;
-    send_framecount = 1;
-    analog_value |= FRAMECOUNT_COMING_MARKER; // set marker in data stream
-  }
+    uint8_t send_framecount = 0;
+    if (timestamp_inc>0) {
+      timestamp_inc--;
+    } else {
+      timestamp_inc=250;
+      send_framecount = 1;
+      analog_value |= FRAMECOUNT_COMING_MARKER; // set marker in data stream
+    }
 
-  /* Analog sample received, store it into the buffer */
-  if (!Buffer_StoreElement(&Tx_Buffer, analog_value)) { // Get left 10 bits plus markers
-    // overflowed ring buffer
-    overflowed = OVERFLOW_MARKER;
-  }
-
-#define SEND_FRAMECOUNT
-#ifdef SEND_FRAMECOUNT
-  if (send_framecount) {
-    // we are in an interrupt, so we don't need to worry about being interrupted
-    Buffer_StoreElement(&Tx_Buffer, (uint16_t)(framecount_A & 0xFFFF));
-    Buffer_StoreElement(&Tx_Buffer, (uint16_t)((framecount_A >> 16) & 0xFFFF));
-    Buffer_StoreElement(&Tx_Buffer, (uint16_t)(epoch & 0xFFFF));
-    Buffer_StoreElement(&Tx_Buffer, (uint16_t)((epoch >> 16) & 0xFFFF));
-    if (!Buffer_StoreElement(&Tx_Buffer, tcnt3_copy)) {
+    /* Analog sample received, store it into the buffer */
+    if (!Buffer_StoreElement(&Tx_Buffer, analog_value)) { // Get left 10 bits plus markers
       // overflowed ring buffer
       overflowed = OVERFLOW_MARKER;
     }
-  }
+
+#define SEND_FRAMECOUNT
+#ifdef SEND_FRAMECOUNT
+    if (send_framecount) {
+      // we are in an interrupt, so we don't need to worry about being interrupted
+      Buffer_StoreElement(&Tx_Buffer, (uint16_t)(framecount_A & 0xFFFF));
+      Buffer_StoreElement(&Tx_Buffer, (uint16_t)((framecount_A >> 16) & 0xFFFF));
+      Buffer_StoreElement(&Tx_Buffer, (uint16_t)(epoch & 0xFFFF));
+      Buffer_StoreElement(&Tx_Buffer, (uint16_t)((epoch >> 16) & 0xFFFF));
+      if (!Buffer_StoreElement(&Tx_Buffer, tcnt3_copy)) {
+        // overflowed ring buffer
+        overflowed = OVERFLOW_MARKER;
+      }
+    }
 #endif
 
 #ifdef DOWNSAMPLE
@@ -259,63 +290,70 @@ void (*start_bootloader) (void)=(void (*)(void))0xf000;
  */
 int main(void)
 {
-	/* Disable watchdog if enabled by bootloader/fuses */
-	MCUSR &= ~(1 << WDRF);
-	wdt_disable();
+  /* Disable watchdog if enabled by bootloader/fuses */
+  MCUSR &= ~(1 << WDRF);
+  wdt_disable();
 
-	/* Disable clock division */
-	SetSystemClockPrescaler(0);
+  /* Disable clock division */
+  SetSystemClockPrescaler(0);
 
-        Buffer_Initialize(&Tx_Buffer);
+  Buffer_Initialize(&Tx_Buffer);
 
-	/* Hardware initialization */
-        DDRF = 0; // Set Port F to be all input (for analog input) //ADC_SetupChannel(1|2|3);
-	//ADC_Init(ADC_FREE_RUNNING | ADC_PRESCALE_128 | ADC_INTERRUPT_ENABLE );
-        ADC_N_CHANS=0;
+  /* Hardware initialization */
+  DDRF = 0; // Set Port F to be all input (for analog input) //ADC_SetupChannel(1|2|3);
+  //ADC_Init(ADC_FREE_RUNNING | ADC_PRESCALE_128 | ADC_INTERRUPT_ENABLE );
+  ADC_N_CHANS=0;
 
-        //#define STARTUP_ADC_CHAN2
+  //#define STARTUP_ADC_CHAN2
 #ifdef STARTUP_ADC_CHAN2
-        ADC_CHANS[0] = 2;
-        ADC_N_CHANS=1;
-        ADC_CHAN_IDX = 0;
-        /* Start the ADC conversion in free running mode */
-        ADCSRA |= (1 << ADIE); /* enable adc interrupt */
-        ADC_StartReading(ADC_REFERENCE_AVCC | ADC_LEFT_ADJUSTED | ADC_CHANS[ADC_CHAN_IDX]);
+  ADC_CHANS[0] = 2;
+  ADC_N_CHANS=1;
+  ADC_CHAN_IDX = 0;
+  /* Start the ADC conversion in free running mode */
+  ADCSRA |= (1 << ADIE); /* enable adc interrupt */
+  ADC_StartReading(ADC_REFERENCE_AVCC | ADC_LEFT_ADJUSTED | ADC_CHANS[ADC_CHAN_IDX]);
 #endif
 
-	LEDs_Init();
+  LEDs_Init();
 
-        PWM_Init();
-        Handler_Init();
+  PWM_Init();
+  Handler_Init();
 
-	/* Turn on interrupts */
-	sei();
+  /* Turn on interrupts */
+  sei();
 
-	/* Initialize Scheduler so that it can be used */
-	Scheduler_Init();
+  /* Initialize Scheduler so that it can be used */
+  Scheduler_Init();
 
-	/* Initialize USB Subsystem */
-	USB_Init();
+  /* Initialize USB Subsystem */
+  USB_Init();
 
-	/* Scheduling - routine never returns, so put this last in the main function */
-	Scheduler_Start();
+  // WBD  setup random pulse generation --------------------------------------- 
+  rand_pulse_disable();
+  //rand_pulse_enable();
+  rand_pulse_setvalue();
+  Reg_Handler( rand_pulse_handler, 1, 3, TRUE);
+  // --------------------------------------------------------------------------
+
+  /* Scheduling - routine never returns, so put this last in the main function */
+  Scheduler_Start();
 }
 
 EVENT_HANDLER(USB_ConfigurationChanged)
 {
   /* Setup USB In and Out Endpoints */
   Endpoint_ConfigureEndpoint(CAMTRIGIN_EPNUM, EP_TYPE_BULK,
-                             ENDPOINT_DIR_IN, CAMTRIGIN_EPSIZE,
-                             ENDPOINT_BANK_SINGLE);
+      ENDPOINT_DIR_IN, CAMTRIGIN_EPSIZE,
+      ENDPOINT_BANK_SINGLE);
 
   Endpoint_ConfigureEndpoint(CAMTRIGOUT_EPNUM, EP_TYPE_BULK,
-                             ENDPOINT_DIR_OUT, CAMTRIGOUT_EPSIZE,
-                             ENDPOINT_BANK_SINGLE);
+      ENDPOINT_DIR_OUT, CAMTRIGOUT_EPSIZE,
+      ENDPOINT_BANK_SINGLE);
 
   /* Setup analog sample stream endpoint */
   Endpoint_ConfigureEndpoint(ANALOG_EPNUM, EP_TYPE_BULK,
-                             ENDPOINT_DIR_IN, ANALOG_EPSIZE,
-                             ENDPOINT_BANK_SINGLE);
+      ENDPOINT_DIR_IN, ANALOG_EPSIZE,
+      ENDPOINT_BANK_SINGLE);
 
 }
 
@@ -344,6 +382,7 @@ void switchoff_trig3(void) {
   trig3_off();
 }
 
+
 static inline void reset_ain(void) {
   cli();
   overflowed=0;
@@ -353,7 +392,7 @@ static inline void reset_ain(void) {
 
 /* Task to listen to USB port, reading in commands from host
    computer, and updating self as desired.
-*/
+   */
 TASK(USB_ControlDevice_Task)
 {
 #define CAMTRIG_ENTER_DFU 0
@@ -366,13 +405,18 @@ TASK(USB_ControlDevice_Task)
 #define CAMTRIG_AIN_SERVICE 7
 #define CAMTRIG_GET_FRAMESTAMP_NOW 8
 #define CAMTRIG_SET_LED_STATE 9
+#define CAMTRIG_RAND_PULSE 10
+#define CAMTRIG_SET_AOUT 11
+#define CAMTRIG_GET_PULSE_WIDTH 12
+  
+#define RAND_PULSE_DISABLE 0 
 
-   uint8_t ext_trig_flags=0;
+  uint8_t ext_trig_flags=0;
 #define EXT_TRIG1 0x01
 #define EXT_TRIG2 0x02
 #define EXT_TRIG3 0x04
 
-   uint8_t analog_cmd_flags=0;
+  uint8_t analog_cmd_flags=0;
 #define ADC_START_STREAMING 0x01
 #define ADC_STOP_STREAMING 0x02
 #define ENABLE_ADC_CHAN0 0x04
@@ -380,20 +424,26 @@ TASK(USB_ControlDevice_Task)
 #define ENABLE_ADC_CHAN2 0x10
 #define ENABLE_ADC_CHAN3 0x20
 #define ADC_RESET_AIN 0x40
-   uint8_t analog_sample_bits = 0;
+  uint8_t analog_sample_bits = 0;
 
-   uint8_t clock_select_timer3=0;
+  uint8_t clock_select_timer3=0;
 
-   uint16_t new_ocr3a=0;
-   uint16_t new_ocr3b=0;
-   uint16_t new_ocr3c=0;
-   uint16_t new_icr3=0; // icr3 is TOP for timer3
-   uint8_t command_class = 0;
-   uint8_t send_data_now = 0;
+  uint16_t new_ocr3a=0;
+  uint16_t new_ocr3b=0;
+  uint16_t new_ocr3c=0;
+  uint16_t new_icr3=0; // icr3 is TOP for timer3
+  uint8_t command_class = 0;
+  uint8_t send_data_now = 0;
 
-   uint16_t tcnt3_copy;
-   uint32_t framecount_A_copy;
-   uint32_t epoch_copy;
+  uint16_t tcnt3_copy;
+  uint32_t framecount_A_copy;
+  uint32_t epoch_copy;
+
+  uint16_t aout_val0;
+  uint16_t aout_val1;
+  uint8_t rand_pulse_cmd;
+  uint8_t pulse_width_copy;
+  uint8_t send_pulse_width = FALSE;
 
   if (USB_IsConnected) {
     /* Select the camera trigger out endpoint */
@@ -401,10 +451,10 @@ TASK(USB_ControlDevice_Task)
 
     /* Check if the current endpoint can be read from (contains a packet) */
     if (Endpoint_ReadWriteAllowed())
-      {
-        command_class = Endpoint_Read_Byte(); // 0
+    {
+      command_class = Endpoint_Read_Byte(); // 0
 
-        switch(command_class) {
+      switch(command_class) {
 
         case CAMTRIG_NEW_TIMER3_DATA: // update timer3
           new_ocr3a =           Endpoint_Read_Byte()<<8; // 1 high byte
@@ -495,15 +545,15 @@ TASK(USB_ControlDevice_Task)
         case CAMTRIG_ENTER_DFU:
           USB_ShutDown();
 
-	  // shutdown timer3 and adc interrupts
-	  ADCSRA &= ~(1 << ADIE); /* disable adc interrupt */
-	  TIMSK3 = 0; /* disable timer3 interrupt */
-	  // shutdown ADC device
-	  ADC_Init(0);
+          // shutdown timer3 and adc interrupts
+          ADCSRA &= ~(1 << ADIE); /* disable adc interrupt */
+          TIMSK3 = 0; /* disable timer3 interrupt */
+          // shutdown ADC device
+          ADC_Init(0);
 
           _delay_ms(200); // 200 msec delay to ensure host logs the disconnection
 
-	  (*start_bootloader)();
+          (*start_bootloader)();
 
           break;
 
@@ -557,7 +607,40 @@ TASK(USB_ControlDevice_Task)
           break;
 
         case CAMTRIG_SET_LED_STATE:
-	  LEDs_SetAllLEDs(Endpoint_Read_Byte());
+          LEDs_SetAllLEDs(Endpoint_Read_Byte());
+          break;
+
+        case CAMTRIG_RAND_PULSE:
+          // Enable/Disable random pulses
+          rand_pulse_cmd = Endpoint_Read_Byte();
+          if (rand_pulse_cmd == RAND_PULSE_DISABLE) {
+            rand_pulse_disable();
+          }
+          else {
+            rand_pulse_enable();
+          }
+          break;
+
+        case CAMTRIG_SET_AOUT:
+          aout_val0 = Endpoint_Read_Byte()<<8;  // 1 high byte
+          aout_val0 += Endpoint_Read_Byte();    // 2 low byte
+
+          aout_val1 = Endpoint_Read_Byte()<<8;  // 1 high byte
+          aout_val1 += Endpoint_Read_Byte();    // 2 low byte
+          set_aout_values(aout_val0,aout_val1);
+          break;
+
+        case CAMTRIG_GET_PULSE_WIDTH:
+          framecount_A_copy  = ((uint32_t) Endpoint_Read_Byte());
+          framecount_A_copy  += ((uint32_t) Endpoint_Read_Byte())<<8;
+          framecount_A_copy  += ((uint32_t) Endpoint_Read_Byte())<<16;
+          framecount_A_copy  += (uint32_t) Endpoint_Read_Byte()<<24;
+          pulse_width_copy = get_pulse_width(framecount_A_copy);
+          send_pulse_width = TRUE;
+          break;
+
+        case 23:
+          // Dummy command for testing
           break;
 
         default:
@@ -565,11 +648,11 @@ TASK(USB_ControlDevice_Task)
           /* Unknown command */
 
           break;
-        }
-
-        /* Acknowedge the packet, clear the bank ready for the next packet */
-        Endpoint_ClearCurrentBank();
       }
+
+      /* Acknowedge the packet, clear the bank ready for the next packet */
+      Endpoint_ClearCurrentBank();
+    }
 
     if (send_data_now) {
       /* Send requested framestamp data back to host */
@@ -577,9 +660,10 @@ TASK(USB_ControlDevice_Task)
 
       ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
       {
-	tcnt3_copy= TCNT3;
-	framecount_A_copy = framecount_A;
-	epoch_copy = epoch;
+        tcnt3_copy= TCNT3;
+        framecount_A_copy = framecount_A;
+        epoch_copy = epoch;
+        pulse_width_copy = rand_pulse_width;
       }
 
       while (!Endpoint_ReadWriteAllowed()) {} //spin
@@ -597,6 +681,18 @@ TASK(USB_ControlDevice_Task)
       Endpoint_Write_Byte((uint8_t)(tcnt3_copy & 0xFF));
       Endpoint_Write_Byte((uint8_t)((tcnt3_copy >> 8) & 0xFF));
 
+      // ---------------------------------------
+      Endpoint_Write_Byte((uint8_t) pulse_width_copy);
+      // ---------------------------------------
+
+      Endpoint_ClearCurrentBank(); // Send data over the USB
+    }
+
+    if (send_pulse_width) {
+      // Send pulse width data back to host
+      Endpoint_SelectEndpoint(CAMTRIGIN_EPNUM);
+      while (!Endpoint_ReadWriteAllowed()) {} //spin
+      Endpoint_Write_Byte((uint8_t) pulse_width_copy);
       Endpoint_ClearCurrentBank(); // Send data over the USB
     }
 
@@ -606,27 +702,107 @@ TASK(USB_ControlDevice_Task)
 TASK(USB_AnalogSample_Task) {
 
   if (USB_IsConnected) {
-		/* Select the Serial Tx Endpoint */
-		Endpoint_SelectEndpoint(ANALOG_EPNUM);
+    /* Select the Serial Tx Endpoint */
+    Endpoint_SelectEndpoint(ANALOG_EPNUM);
 
-                if (Endpoint_ReadWriteAllowed())
-                  {
-                    /* Check if the Tx buffer contains anything to be sent to the host */
-                    if (Tx_Buffer.Elements)
-                      {
+    if (Endpoint_ReadWriteAllowed())
+    {
+      /* Check if the Tx buffer contains anything to be sent to the host */
+      if (Tx_Buffer.Elements)
+      {
 
-			/* Write the transmission buffer contents to the received data endpoint */
-			while (Tx_Buffer.Elements && ((Endpoint_BytesInEndpoint()+1) < ANALOG_EPSIZE)) {
-			  uint16_t tmp = Buffer_GetElement(&Tx_Buffer);
-			  Endpoint_Write_Word_LE(tmp);
-			  //Endpoint_Write_Word_LE(Buffer_GetElement(&Tx_Buffer));
-                        }
+        /* Write the transmission buffer contents to the received data endpoint */
+        while (Tx_Buffer.Elements && ((Endpoint_BytesInEndpoint()+1) < ANALOG_EPSIZE)) {
+          uint16_t tmp = Buffer_GetElement(&Tx_Buffer);
+          Endpoint_Write_Word_LE(tmp);
+          //Endpoint_Write_Word_LE(Buffer_GetElement(&Tx_Buffer));
+        }
 
-			/* Send the data */
-			Endpoint_ClearCurrentBank();
+        /* Send the data */
+        Endpoint_ClearCurrentBank();
 
-                      }
-                  }
+      }
+    }
   }
 }
+
+//
+// WBD - functions for handling random pulse generation
+// ----------------------------------------------------------------------------
+void rand_pulse_handler(void) {
+  // Reg handler function for random pulse generation
+  rand_pulse_setvalue();
+  Reg_Handler( rand_pulse_handler, 1, 3, TRUE);
+}
+
+void rand_pulse_setvalue(void) {
+  // Sets random pulse width value 
+  if (rand() < RAND_MAX/2) {
+    rand_pulse_width = RAND_PULSE_SHORT;
+    OCR3B = 0x07D0;
+  }
+  else {
+    rand_pulse_width = RAND_PULSE_LONG;
+    OCR3B = 0x1770;
+  }
+  update_pulse_buf(rand_pulse_width);
+}
+
+void update_pulse_buf(uint8_t pulse_width) {
+  // Updates the random pulse buffer
+  rand_pulse_buf.pos++;
+  if (rand_pulse_buf.pos >= PULSE_BUF_SZ) {
+    rand_pulse_buf.pos = 0;
+  }
+  rand_pulse_buf.width[rand_pulse_buf.pos] = pulse_width;
+  rand_pulse_buf.frame[rand_pulse_buf.pos] = framecount_A+2;
+  // Note, +2 becuase of double buffering of OCR3B (which adds +1) 
+  // and because frame count occurs in ISR(TIMER3_COMPA_vect, ISR_BLOCK)
+  // which add another +1 as it occurs after the overflow interrupt.
+}
+
+void rand_pulse_enable(void) {
+  // Enable random pulse generation
+  DDRC |= 0b00100000; 
+}
+
+void rand_pulse_disable(void) {
+  // Disable random pulse generation
+  DDRC &= 0b11011111;
+}
+
+uint8_t get_pulse_width(uint32_t frame) {
+  // Get pulse width associated with frame and epoch from pulse buffer
+  uint8_t i;
+  uint8_t pulse_width = RAND_PULSE_NOT_FOUND;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    for (i=0; i<PULSE_BUF_SZ;i++) {
+      if (frame == rand_pulse_buf.frame[i]) {
+        pulse_width = rand_pulse_buf.width[i];
+      }
+    }
+  }
+  return pulse_width;
+}
+
+// ----------------------------------------------------------------------------
+//
+// WBD - function for setting PWM generated analog output valus
+//
+// ----------------------------------------------------------------------------
+void set_aout_values(uint16_t value0, uint16_t value1) {
+  if (value0 <= TIMER1_TOP) {
+    OCR1A = value0;
+  }
+  else {
+    OCR1A = TIMER1_TOP;
+  }
+  if (value1 <= TIMER1_TOP) {
+    OCR1B = value1;
+  }
+  else {
+    OCR1B = TIMER1_TOP;
+  }
+}
+
 

@@ -8,7 +8,8 @@ import numpy as np
 from optparse import OptionParser
 
 ENDPOINT_DIR_IN = 0x80
-ANALOG_EPNUM = 0x01
+CAMTRIG_EPNUM = 0x02
+ANALOG_EPNUM = 0x03
 
 # keep in sync with defines in camtrig.c
 CAMTRIG_ENTER_DFU = 0
@@ -21,6 +22,13 @@ CAMTRIG_SET_EXT_TRIG = 6
 CAMTRIG_AIN_SERVICE = 7
 CAMTRIG_GET_FRAMESTAMP_NOW = 8
 CAMTRIG_SET_LED_STATE = 9
+CAMTRIG_RAND_PULSE = 10
+CAMTRIG_SET_AOUT = 11
+CAMTRIG_GET_PULSE_WIDTH = 12
+
+RAND_PULSE_ENABLE = 1
+RAND_PULSE_DISABLE = 0
+AOUT_MAX_VALUE = 500
 
 EXT_TRIG1 = 0x01
 EXT_TRIG2 = 0x02
@@ -41,7 +49,7 @@ LEDS_LED3 = 1 << 7 # for the Atmel USBKEY port D
 LEDS_LED4 = 1 << 6 # for the Atmel USBKEY port D
 
 def debug(*args):
-    if 0:
+    if 1:
         print >> sys.stderr, ' '.join([str(arg) for arg in args])
 
 class NoDataError(Exception):
@@ -269,6 +277,11 @@ class DeviceModel(traits.HasTraits):
         self.__t3_state_changed()
         self.__ain_state_changed()
         self.reset_AIN_overflow = True # reset ain overflow
+
+        #self.rand_pulse_enable()
+        #self.rand_pulse_disable()
+        #self.set_aout_values(300,250)
+
         return self
 
     def _set_led_mask(self,led_mask,value):
@@ -413,10 +426,17 @@ class DeviceModel(traits.HasTraits):
                   'large fractional value in framestamp. resetting')
             frac=1
         framestamp = framecount+frac
+        # WBD  
+        #if full_output:
+        #    results = framestamp, framecount, tcnt3
+        #else:
+        #    results = framestamp
+        pulse_width = ord(data[10])
         if full_output:
-            results = framestamp, framecount, tcnt3
+            results = framestamp, pulse_width, framecount, tcnt3
         else:
-            results = framestamp
+            results = framestamp, pulse_width
+
         return results
 
     def get_analog_input_buffer_rawLE(self):
@@ -561,23 +581,64 @@ class DeviceModel(traits.HasTraits):
         # 3rd byte doesn't matter
         self._send_buf(buf)
 
-    def _send_buf(self,buf):
-        if not self.real_device:
-            return
-        with self._lock:
-            val = usb.bulk_write(self._libusb_handle, 0x06, buf, 9999)
+    # WBD - functions for enabling and disabling random pulses
+    # --------------------------------------------------------
+    def rand_pulse_enable(self):
+        buf = ctypes.create_string_buffer(2)
+        buf[0] = chr(CAMTRIG_RAND_PULSE)
+        buf[1] = chr(RAND_PULSE_ENABLE)
+        self._send_buf(buf)
 
+    def rand_pulse_disable(self):
+        buf = ctypes.create_string_buffer(2)
+        buf[0] = chr(CAMTRIG_RAND_PULSE)
+        buf[1] = chr(RAND_PULSE_DISABLE)
+        self._send_buf(buf)
+
+    # WBD - function for setting analog output values
+    # -------------------------------------------------------
+    def set_aout_values(self,val0, val1):
+        buf = ctypes.create_string_buffer(5)
+        buf[0] = chr(CAMTRIG_SET_AOUT)
+        buf[1] = chr(val0//0x100)
+        buf[2] = chr(val0%0x100)
+        buf[3] = chr(val1//0x100) 
+        buf[4] = chr(val1%0x100) 
+        self._send_buf(buf)
+
+    # WBD - get pulse width from frame count
+    # -------------------------------------------------------
+    def get_width_from_framecnt(self,framecnt):
+        buf = ctypes.create_string_buffer(5)
+        buf[0] = chr(CAMTRIG_GET_PULSE_WIDTH)
+        for i in range(1,5):
+            buf[i] = chr((framecnt >> ((i-1)*8)) & 0b11111111)
+        self._send_buf(buf)
+        data = self._read_buf()
+        val = ord(data[0])
+        return val
+
+    # WBD - modified read_buf functions for multiple epnum in buffers
+    # ---------------------------------------------------------------
     def _read_buf(self):
         if not self.real_device:
             return None
         buf = ctypes.create_string_buffer(16)
         timeout = 1000
+        epnum = (ENDPOINT_DIR_IN|CAMTRIG_EPNUM)
         with self._lock:
             try:
-                val = usb.bulk_read(self._libusb_handle, 0x82, buf, timeout)
+                val = usb.bulk_read(self._libusb_handle, epnum, buf, timeout)
             except usb.USBNoDataAvailableError:
                 return None
         return buf
+    # ---------------------------------------------------------------
+
+    def _send_buf(self,buf):
+        if not self.real_device:
+            return
+        with self._lock:
+            val = usb.bulk_write(self._libusb_handle, 0x06, buf, 9999)
 
     def _open_device(self):
         require_trigger = int(os.environ.get('REQUIRE_TRIGGER','1'))
@@ -733,7 +794,7 @@ def set_frequency():
     while time.time() < t_stop:
         # busy wait for accurate timing
         pass
-    framestamp = dev.get_framestamp()
+    framestamp, pulse_width = dev.get_framestamp()
     fps = framestamp/n_secs
     #print 'framecount, tct3,fps',framecount, tcnt3,fps
     theory = dev.frames_per_second_actual

@@ -1,30 +1,30 @@
 /* Motmot camera trigger device
-   http://code.astraw.com/projects/motmot
-   Andrew Straw
+http://code.astraw.com/projects/motmot
+Andrew Straw
 */
 
 /*
-  Copyright 2009  California Institute of Technology
-  Copyright 2009  Dean Camera (dean [at] fourwalledcubicle [dot] com)
+   Copyright 2009  California Institute of Technology
+   Copyright 2009  Dean Camera (dean [at] fourwalledcubicle [dot] com)
 
-  Permission to use, copy, modify, and distribute this software
-  and its documentation for any purpose and without fee is hereby
-  granted, provided that the above copyright notice appear in all
-  copies and that both that the copyright notice and this
-  permission notice and warranty disclaimer appear in supporting
-  documentation, and that the name of the author not be used in
-  advertising or publicity pertaining to distribution of the
-  software without specific, written prior permission.
+   Permission to use, copy, modify, and distribute this software
+   and its documentation for any purpose and without fee is hereby
+   granted, provided that the above copyright notice appear in all
+   copies and that both that the copyright notice and this
+   permission notice and warranty disclaimer appear in supporting
+   documentation, and that the name of the author not be used in
+   advertising or publicity pertaining to distribution of the
+   software without specific, written prior permission.
 
-  The author disclaim all warranties with regard to this
-  software, including all implied warranties of merchantability
-  and fitness.  In no event shall the author be liable for any
-  special, indirect or consequential damages or any damages
-  whatsoever resulting from loss of use, data or profits, whether
-  in an action of contract, negligence or other tortious action,
-  arising out of or in connection with the use or performance of
-  this software.
-*/
+   The author disclaim all warranties with regard to this
+   software, including all implied warranties of merchantability
+   and fitness.  In no event shall the author be liable for any
+   special, indirect or consequential damages or any damages
+   whatsoever resulting from loss of use, data or profits, whether
+   in an action of contract, negligence or other tortious action,
+   arising out of or in connection with the use or performance of
+   this software.
+   */
 
 /** \file
  *
@@ -34,37 +34,56 @@
 #ifndef _CAMTRIG_H_
 #define _CAMTRIG_H_
 
-	/* Includes: */
-		#include <avr/io.h>
-		#include <avr/interrupt.h>
-		#include <avr/wdt.h>
+/* Includes: */
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <avr/wdt.h>
 
-                #include "Descriptors.h"
+#include "Descriptors.h"
 
-		#include <LUFA/Version.h>                               // Library Version Information
-		#include <LUFA/Drivers/USB/USB.h>                       // USB Functionality
-		#include <LUFA/Scheduler/Scheduler.h>                   // Simple scheduler for task management
-//		#include <LUFA/MemoryAllocator/DynAlloc.h>              // Auto-defragmenting Dynamic Memory allocation
-		#include <LUFA/Common/ButtLoadTag.h>                    // PROGMEM tags readable by the ButtLoad project
-		#include <LUFA/Drivers/AT90USBXXX/ADC.h>                // ADC driver
-		#include <LUFA/Drivers/Board/LEDs.h>                    // LED driver
-                #include <RingBuff.h>
+#include <LUFA/Version.h>                               // Library Version Information
+#include <LUFA/Drivers/USB/USB.h>                       // USB Functionality
+#include <LUFA/Scheduler/Scheduler.h>                   // Simple scheduler for task management
+//    #include <LUFA/MemoryAllocator/DynAlloc.h>              // Auto-defragmenting Dynamic Memory allocation
+#include <LUFA/Common/ButtLoadTag.h>                    // PROGMEM tags readable by the ButtLoad project
+#include <LUFA/Drivers/AT90USBXXX/ADC.h>                // ADC driver
+#include <LUFA/Drivers/Board/LEDs.h>                    // LED driver
+#include <RingBuff.h>
 
-	/* Task Definitions: */
-                TASK(USB_ControlDevice_Task);
-                TASK(USB_AnalogSample_Task);
+#define PULSE_BUF_SZ 10
 
-	/* Event Handlers: */
-		/** Indicates that this module will catch the USB_Connect event when thrown by the library. */
-		HANDLES_EVENT(USB_Connect);
+typedef struct _rand_pulse_buf_t {
+  uint8_t  pos;
+  uint8_t  width[PULSE_BUF_SZ];
+  uint32_t frame[PULSE_BUF_SZ];
+} rand_pulse_buf_t;
 
-		/** Indicates that this module will catch the USB_Disconnect event when thrown by the library. */
-		HANDLES_EVENT(USB_Disconnect);
+/* Task Definitions: */
+TASK(USB_ControlDevice_Task);
+TASK(USB_AnalogSample_Task);
 
-		/** Indicates that this module will catch the USB_ConfigurationChanged event when thrown by the library. */
-		HANDLES_EVENT(USB_ConfigurationChanged);
+/* Event Handlers: */
+/** Indicates that this module will catch the USB_Connect event when thrown by the library. */
+HANDLES_EVENT(USB_Connect);
 
-		/** Indicates that this module will catch the USB_UnhandledControlPacket event when thrown by the library. */
-		HANDLES_EVENT(USB_UnhandledControlPacket);
+/** Indicates that this module will catch the USB_Disconnect event when thrown by the library. */
+HANDLES_EVENT(USB_Disconnect);
+
+/** Indicates that this module will catch the USB_ConfigurationChanged event when thrown by the library. */
+HANDLES_EVENT(USB_ConfigurationChanged);
+
+/** Indicates that this module will catch the USB_UnhandledControlPacket event when thrown by the library. */
+HANDLES_EVENT(USB_UnhandledControlPacket);
+
+/* Functions for random pulse generation */
+void rand_pulse_handler(void);
+void rand_pulse_enable(void);
+void rand_pulse_disable(void);
+void rand_pulse_setvalue(void);
+void update_pulse_buf(uint8_t pulse_width);
+uint8_t get_pulse_width(uint32_t frame);
+
+/* Function for setting PWM generated analog outputs */
+void set_aout_values(uint16_t value0,  uint16_t value1);
 
 #endif

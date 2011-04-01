@@ -26,6 +26,10 @@ def myformat2(x):
     return "%.3f"%x
 
 class LiveTimestampModeler(traits.HasTraits):
+
+    rand_pulse_flag = False
+    rand_pulse_data = (-1,-1)
+
     _trigger_device = traits.Instance(ttrigger.DeviceModel)
 
     sync_interval = traits.Float(2.0)
@@ -173,7 +177,7 @@ class LiveTimestampModeler(traits.HasTraits):
         while count <= 10:
             now1 = time.time()
             try:
-                results = self._trigger_device.get_framestamp(full_output=full_output)
+                results, pulse_width = self._trigger_device.get_framestamp(full_output=full_output)
             except ttrigger.NoDataError:
                 raise ImpreciseMeasurementError(
                     'no data available')
@@ -202,6 +206,14 @@ class LiveTimestampModeler(traits.HasTraits):
             results = now, framestamp, now1, now2, framecount, tcnt
         else:
             results = now, framestamp
+
+        # WBD  - second attemp at random pulses
+        # ----------------------------------------------------
+        self.rand_pulse_flag = True
+        self.rand_pulse_data = (int(framestamp)+1, pulse_width)
+        # Note, +1 one because of double buffering of OCR3B in
+        # at90usb1287 means pulse widths lead framecount by 1
+        # ----------------------------------------------------
         return results
 
     def clear_samples(self,call_update=True):
@@ -478,3 +490,31 @@ class LiveTimestampModelerWithAnalogInput(LiveTimestampModeler):
 
     def _view_AIN_fired(self):
         self.viewer.edit_traits()
+
+    # WBD - set analog aoutput values using trigger devie
+    # -------------------------------------------------------------------------
+    def rand_pulse_enable(self):
+        self._trigger_device.rand_pulse_enable()
+
+    def rand_pulse_disable(self):
+        self._trigger_device.rand_pulse_disable()
+
+    def set_aout_values(self,val0,val1):
+        self._trigger_device.set_aout_values(val0,val1)
+
+    def get_width_from_framecnt(self,framecnt):
+        val = self._trigger_device.get_width_from_framecnt(framecnt)
+        return val
+
+    def get_framestamp(self):
+        """
+        WBD - For testing
+        """
+        framestamp, pulse_width, framecount, tcnt3 = self._trigger_device.get_framestamp(full_output=True)
+        return framestamp, framecount, tcnt3
+
+
+
+
+
+

@@ -10,6 +10,10 @@ The registered interrupts are called according to their time interval.
 The units of time are the overflow of a counter.
 */
 
+// WBD TEMP ///////////////////////////////////////////////////////////////////
+//#include <stdlib.h>
+/////////////////////////////////////////////////////////////////////////////// 
+
 #include "handler.h"
 
 #include <avr/interrupt.h>
